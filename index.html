@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Zombie Run — Survie en temps réel</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; background: #0a0a0f; }
+  #map { position: absolute; inset: 0; filter: saturate(0.85) brightness(0.95); }
+
+  .hud {
+    position: absolute; top: 0; left: 0; right: 0; z-index: 1000;
+    padding: 10px 12px; display: flex; gap: 8px; flex-wrap: wrap;
+    pointer-events: none;
+  }
+  .hud .card {
+    pointer-events: auto; background: rgba(10,10,20,.85); color: #eee;
+    border: 1px solid rgba(255,255,255,.15); border-radius: 12px;
+    padding: 8px 12px; font-size: 13px; backdrop-filter: blur(6px);
+    box-shadow: 0 2px 10px rgba(0,0,0,.5);
+  }
+  .bar { width: 110px; height: 8px; background: rgba(255,255,255,.12); border-radius: 4px; overflow: hidden; margin-top: 4px; }
+  .bar > div { height: 100%; border-radius: 4px; transition: width .3s; }
+  #hpBar > div { background: linear-gradient(90deg, #ff3b3b, #ff7b4f); width: 100%; }
+  #energyBar > div { background: linear-gradient(90deg, #38bdf8, #818cf8); width: 100%; }
+
+  .bottom {
+    position: absolute; bottom: 18px; left: 0; right: 0; z-index: 1000;
+    display: flex; flex-direction: column; align-items: center; gap: 10px; pointer-events: none;
+  }
+  #stealthBtn {
+    pointer-events: auto; border: none; border-radius: 50px; padding: 16px 34px;
+    font-size: 17px; font-weight: 700; color: #fff; cursor: pointer;
+    background: linear-gradient(135deg, #4f46e5, #7c3aed);
+    box-shadow: 0 4px 18px rgba(79,70,229,.55); transition: transform .1s;
+  }
+  #stealthBtn:active { transform: scale(.95); }
+  #stealthBtn.on {
+    background: linear-gradient(135deg, #0f766e, #14b8a6);
+    box-shadow: 0 0 22px rgba(20,184,166,.7);
+  }
+  #status { pointer-events: none; color: #fff; font-size: 14px; font-weight: 600;
+    background: rgba(0,0,0,.65); padding: 6px 14px; border-radius: 20px; backdrop-filter: blur(4px); }
+
+  .overlay {
+    position: absolute; inset: 0; z-index: 2000; background: rgba(5,5,12,.92);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    color: #eee; text-align: center; padding: 24px; gap: 16px;
+  }
+  .overlay h1 { font-size: 34px; color: #ff4d4d; text-shadow: 0 0 18px rgba(255,0,0,.6); }
+  .overlay p { max-width: 420px; line-height: 1.6; font-size: 15px; color: #ccc; }
+  .overlay button {
+    border: none; border-radius: 50px; padding: 15px 40px; font-size: 17px; font-weight: 700;
+    color: #fff; cursor: pointer; background: linear-gradient(135deg, #dc2626, #f97316);
+    box-shadow: 0 4px 18px rgba(220,38,38,.5);
+  }
+  .hidden { display: none !important; }
+  .stats { display: flex; gap: 24px; font-size: 16px; }
+  .stats b { color: #4ade80; font-size: 22px; display: block; }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div class="hud">
+  <div class="card">❤️ Vie<div class="bar" id="hpBar"><div></div></div></div>
+  <div class="card">⚡ Énergie<div class="bar" id="energyBar"><div></div></div></div>
+  <div class="card">🎒 Loot : <b id="lootCount">0</b></div>
+  <div class="card">🧟 Zombies : <b id="zombieCount">0</b></div>
+</div>
+
+<div class="bottom">
+  <div id="status">Recherche du signal GPS…</div>
+  <button id="stealthBtn">👻 Mode furtif</button>
+</div>
+
+<div class="overlay" id="startScreen">
+  <h1>🧟 ZOMBIE RUN</h1>
+  <p>Bouge dans le monde réel pour fuir les zombies (points rouges) qui te traquent.<br><br>
+  <b style="color:#4ade80">🎯 Objectif :</b> va sur les zones de loot (verts) et <b>active le mode furtif</b> à proximité pour les ramasser.<br><br>
+  ⚠️ Les zombies sont plus lents que toi mais ils sont nombreux. En furtif, ils te perdent de vue… mais ton énergie baisse.</p>
+  <button id="startBtn">DÉMARRER LA SURVIE</button>
+</div>
+
+<div class="overlay hidden" id="gameOverScreen">
+  <h1>💀 TU ES MORT</h1>
+  <div class="stats">
+    <span><b id="finalLoot">0</b>Loots</span>
+    <span><b id="finalTime">0s</b>Temps</span>
+  </div>
+  <button id="restartBtn">REJOUER</button>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const map = L.map('map', { zoomControl: false }).setView([48.8566, 2.3522], 17);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19, attribution: '© OpenStreetMap'
+}).addTo(map);
+
+const R = 6371000;
+function moveToward(lat1, lon1, lat2, lon2, dist) {
+  const rad = Math.PI / 180;
+  const dLat = (lat2 - lat1) * rad, dLon = (lon2 - lon1) * rad;
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*rad) * Math.cos(lat2*rad) * Math.sin(dLon/2)**2;
+  const d = 2 * R * Math.asin(Math.sqrt(a));
+  if (d < 0.5) return [lat2, lon2];
+  const brg = Math.atan2(Math.sin(dLon)*Math.cos(lat2*rad),
+    Math.cos(lat1*rad)*Math.sin(lat2*rad) - Math.sin(lat1*rad)*Math.cos(lat2*rad)*Math.cos(dLon));
+  const ratio = Math.min(dist / d, 1);
+  const lat3 = lat1 + (lat2 - lat1) * ratio;
+  const lon3 = lon1 + (lon2 - lon1) * ratio;
+  return [lat3, lon3, d];
+}
+function distM(lat1, lon1, lat2, lon2) {
+  const rad = Math.PI / 180;
+  const a = Math.sin((lat2-lat1)*rad/2)**2 + Math.cos(lat1*rad)*Math.cos(lat2*rad)*Math.sin((lon2-lon1)*rad/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+function randPointAround(lat, lon, min, max) {
+  const brg = Math.random() * 2 * Math.PI;
+  const d = min + Math.random() * (max - min);
+  const rad = Math.PI / 180;
+  const dLat = d * Math.cos(brg) / R / rad;
+  const dLon = d * Math.sin(brg) / (R * Math.cos(lat*rad)) / rad;
+  return [lat + dLat, lon + dLon];
+}
+
+let player = null, playing = false, stealth = false;
+let hp = 100, energy = 100, loots = 0, startTime = 0;
+let zombies = [], lootSpots = [], tickTimer = null;
+let playerMarker, accuracyCircle, stealthZone;
+
+const zombieIcon = L.divIcon({ className: '', html:
+  '<div style="width:16px;height:16px;background:#ff2d2d;border:2px solid #7f0000;border-radius:50%;box-shadow:0 0 10px #ff2d2d;"></div>',
+  iconSize: [16,16], iconAnchor: [8,8] });
+const lootIcon = L.divIcon({ className: '', html:
+  '<div style="width:22px;height:22px;background:#22c55e;border:3px solid #bbf7d0;border-radius:50%;box-shadow:0 0 14px #22c55e;display:flex;align-items:center;justify-content:center;font-size:12px;">💰</div>',
+  iconSize: [22,22], iconAnchor: [11,11] });
+const playerIcon = L.divIcon({ className: '', html:
+  '<div style="width:18px;height:18px;background:#3b82f6;border:3px solid #fff;border-radius:50%;box-shadow:0 0 14px #3b82f6;"></div>',
+  iconSize: [18,18], iconAnchor: [9,9] });
+
+const statusEl = document.getElementById('status');
+const stealthBtn = document.getElementById('stealthBtn');
+
+stealthBtn.addEventListener('click', () => {
+  if (!playing) return;
+  stealth = !stealth;
+  stealthBtn.classList.toggle('on', stealth);
+  stealthBtn.textContent = stealth ? '👁️ Mode visible' : '👻 Mode furtif';
+  if (stealthZone) stealthZone.remove();
+  if (stealth && player) {
+    stealthZone = L.circle(player, { radius: 30, color: '#14b8a6', weight: 2, fillOpacity: 0.08, dashArray: '6 6' }).addTo(map);
+  }
+});
+
+document.getElementById('startBtn').addEventListener('click', () => {
+  document.getElementById('startScreen').classList.add('hidden');
+  startGame();
+});
+document.getElementById('restartBtn').addEventListener('click', () => {
+  document.getElementById('gameOverScreen').classList.add('hidden');
+  cleanup();
+  startGame();
+});
+
+function startGame() {
+  hp = 100; energy = 100; loots = 0; stealth = false; playing = false;
+  stealthBtn.classList.remove('on');
+  stealthBtn.textContent = '👻 Mode furtif';
+  updateHUD();
+  statusEl.textContent = 'Recherche du signal GPS…';
+  navigator.geolocation.watchPosition(onPosition, onGeoError, {
+    enableHighAccuracy: true, maximumAge: 1000, timeout: 15000
+  });
+}
+
+function cleanup() {
+  if (tickTimer) clearInterval(tickTimer);
+  zombies.forEach(z => z.marker.remove()); zombies = [];
+  lootSpots.forEach(l => l.marker.remove()); lootSpots = [];
+  if (stealthZone) { stealthZone.remove(); stealthZone = null; }
+  if (accuracyCircle) { accuracyCircle.remove(); accuracyCircle = null; }
+  if (playerMarker) { playerMarker.remove(); playerMarker = null; }
+}
+
+function onPosition(pos) {
+  const lat = pos.coords.latitude, lon = pos.coords.longitude;
+  if (!playerMarker) {
+    player = [lat, lon];
+    playerMarker = L.marker(player, { icon: playerIcon, zIndexOffset: 1000 }).addTo(map);
+    map.setView(player, 17);
+  } else {
+    player = [lat, lon];
+    playerMarker.setLatLng(player);
+  }
+  if (accuracyCircle) accuracyCircle.setLatLng(player);
+  else accuracyCircle = L.circle(player, { radius: pos.coords.accuracy || 15, color: '#3b82f6', weight: 1, fillOpacity: 0.08 }).addTo(map);
+
+  if (stealthZone) stealthZone.setLatLng(player);
+
+  if (!playing) {
+    playing = true;
+    startTime = Date.now();
+    spawnLoot(); spawnLoot(); spawnLoot();
+    for (let i = 0; i < 3; i++) spawnZombie();
+    tickTimer = setInterval(gameTick, 1000);
+    statusEl.textContent = 'Survie en cours…';
+  }
+}
+
+function onGeoError(err) {
+  statusEl.textContent = '⚠️ GPS introuvable : autorise la géolocalisation';
+}
+
+function spawnZombie() {
+  const p = randPointAround(player[0], player[1], 70, 130);
+  const marker = L.circleMarker(p, {
+    radius: 8, color: '#7f0000', weight: 2, fillColor: '#ff2d2d', fillOpacity: 1
+  }).addTo(map);
+  zombies.push({ lat: p[0], lon: p[1], marker, speed: 1.0 + Math.random() * 0.8 });
+  updateHUD();
+}
+
+function spawnLoot() {
+  const p = randPointAround(player[0], player[1], 120, 350);
+  const marker = L.marker(p, { icon: lootIcon }).addTo(map);
+  lootSpots.push({ lat: p[0], lon: p[1], marker });
+}
+
+function gameTick() {
+  if (!playing || !player) return;
+
+  for (const z of zombies) {
+    const d = distM(z.lat, z.lon, player[0], player[1]);
+    if (stealth && d > 30) {
+      const wp = randPointAround(z.lat, z.lon, 0, 8);
+      z.lat = wp[0]; z.lon = wp[1];
+    } else {
+      const [nlat, nlon] = moveToward(z.lat, z.lon, player[0], player[1], z.speed);
+      z.lat = nlat; z.lon = nlon;
+    }
+    z.marker.setLatLng([z.lat, z.lon]);
+  }
+
+  for (let i = zombies.length - 1; i >= 0; i--) {
+    const z = zombies[i];
+    const d = distM(z.lat, z.lon, player[0], player[1]);
+    if (d < 8) {
+      hp -= stealth ? 3 : 6;
+      const p2 = randPointAround(player[0], player[1], 45, 65);
+      z.lat = p2[0]; z.lon = p2[1];
+      z.marker.setLatLng(p2);
+    }
+  }
+
+  for (let i = lootSpots.length - 1; i >= 0; i--) {
+    const l = lootSpots[i];
+    const d = distM(l.lat, l.lon, player[0], player[1]);
+    if (d < 25 && stealth) {
+      l.marker.remove();
+      lootSpots.splice(i, 1);
+      loots++;
+      spawnLoot();
+      if (loots % 2 === 0) spawnZombie();
+      statusEl.textContent = '💰 Loot récupéré !';
+      setTimeout(() => { if (playing) statusEl.textContent = 'Survie en cours…'; }, 2000);
+    }
+  }
+
+  if (stealth) {
+    energy -= 4;
+    if (energy <= 0) { energy = 0; stealth = false; stealthBtn.classList.remove('on');
+      stealthBtn.textContent = '👻 Mode furtif';
+      if (stealthZone) { stealthZone.remove(); stealthZone = null; }
+      statusEl.textContent = '😴 Épuisée ! Plus d\'énergie'; }
+  } else if (energy < 100) {
+    energy += 2;
+  }
+
+  if (hp <= 0) return gameOver();
+  updateHUD();
+}
+
+function updateHUD() {
+  document.querySelector('#hpBar > div').style.width = Math.max(0, hp) + '%';
+  document.querySelector('#energyBar > div').style.width = Math.max(0, energy) + '%';
+  document.getElementById('lootCount').textContent = loots;
+  document.getElementById('zombieCount').textContent = zombies.length;
+}
+
+function gameOver() {
+  playing = false;
+  clearInterval(tickTimer);
+  const secs = Math.floor((Date.now() - startTime) / 1000);
+  document.getElementById('finalLoot').textContent = loots;
+  document.getElementById('finalTime').textContent = secs + 's';
+  document.getElementById('gameOverScreen').classList.remove('hidden');
+}
+</script>
+</body>
+</html>
